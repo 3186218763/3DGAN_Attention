@@ -1,0 +1,7 @@
+torch~=2.3.0+cu118
+pandas~=2.2.2
+numpy~=1.26.4
+pillow~=10.3.0
+torchvision~=0.18.0+cu118
+scipy~=1.13.0
+tqdm
