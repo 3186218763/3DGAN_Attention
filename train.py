@@ -27,7 +27,7 @@ if __name__ == '__main__':
                          min_val=min_val, ).to(device)
     dataset = GS_Dataset(img_path='./data/images', data_path='./data/inputs/images.csv')
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=1, pin_memory=True)
-    optimizer = optim.Adam(net.parameters(), lr=1e-3)
+    optimizer = optim.Adam(net.parameters(), lr=3e-4)
     loss_func = nn.MSELoss()
     for epoch in range(num_epochs):
         for batch_idx, (data, img) in enumerate(dataloader):

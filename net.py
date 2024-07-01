@@ -43,15 +43,20 @@ class Ellipsoids(nn.Module):
                  scale_dim=64,
                  ):
         super().__init__()
-        Center = nn.Parameter(torch.empty(num_points, matrix_dim).uniform_(min_val, max_val))
-        Rotate = nn.Parameter(torch.ones(num_points, rotate_dim))
-        Scale = nn.Parameter(torch.ones(num_points, scale_dim))
 
-        self.gaussian_ellipsoids = torch.cat((Center, Rotate, Scale), dim=1)
+        # 定义模型参数
+        self.Center = nn.Parameter(torch.empty(num_points, matrix_dim).uniform_(min_val, max_val))
+        self.Rotate = nn.Parameter(torch.ones(num_points, rotate_dim))
+        self.Scale = nn.Parameter(torch.ones(num_points, scale_dim))
 
     def forward(self, x):
-        x = self.gaussian_ellipsoids.to(x.device)
-        return x
+        # 拼接模型参数
+        gaussian_ellipsoids = torch.cat((self.Center, self.Rotate, self.Scale), dim=1)
+
+        # 将拼接后的张量移到输入 x 所在的设备上
+        gaussian_ellipsoids = gaussian_ellipsoids.to(x.device)
+
+        return gaussian_ellipsoids
 
 
 class Cross_Attention_Block(nn.Module):
@@ -94,13 +99,19 @@ class Attention_3DGS(nn.Module):
         super().__init__()
         self.seq_len = seq_len
         self.input_dim = input_dim
-        self.paper_size = paper_size
+        self.embed_dim = embed_dim
+        self.H, self.W, self.C = paper_size
         self.fc_seq = nn.Linear(input_dim, input_dim * seq_len)
         self.gen_gaussian_ellipsoids = Ellipsoids(num_points, matrix_dim, min_val, max_val, rotate_dim, scale_dim)
         self.paper_self_attention = Self_Attention_Block(seq_len, input_dim, embed_dim)
-        self.brush_self_attention = Self_Attention_Block(num_points, matrix_dim+rotate_dim+scale_dim, embed_dim)
+        self.brush_self_attention = Self_Attention_Block(num_points, matrix_dim + rotate_dim + scale_dim, embed_dim)
         self.draw_cross_attention = Cross_Attention_Block(seq_len, num_points, embed_dim, num_layers, num_heads,
                                                           dropout)
+        self.get_drawing = nn.Sequential(
+            nn.Unflatten(1, (self.H, self.W, self.C)),
+            nn.ReLU(),
+            nn.Hardtanh(-1, 1)
+        )
 
     def forward(self, x):
         x = self.fc_seq(x)  # (batch, 6) -> (batch, seq_len*input_dim)
@@ -110,10 +121,11 @@ class Attention_3DGS(nn.Module):
         paper_q = self.paper_self_attention(q)  # (batch, seq_len, embed_dim)
         brush_kv = self.brush_self_attention(kv)  # (batch, num_points, embed_dim)
         x = self.draw_cross_attention(paper_q, brush_kv)  # (batch, seq_len, embed_dim)
-        x = x.reshape(8, -1)  # (batch, seq_len, embed_dim) -> (batch, seq_len*embed_dim)
-        x = x.view(-1, *self.paper_size)  # (batch, seq_len*embed_dim) -> (batch, paper_size(512, 512, 3))
-        x = torch.clamp(x, 0, 1)
-        x = (x * 255).round().clamp(0, 255).byte()
+        x = x.reshape(-1, self.seq_len * self.embed_dim)  # (batch, seq_len, embed_dim) -> (batch, seq_len*embed_dim)
+        x = self.get_drawing(x)
+        x = (x+1.)*127.5
+        x = x.round()
+
         return x
 
 
@@ -140,4 +152,4 @@ if __name__ == '__main__':
                          min_val=min_val, ).to(device)
     paper = net(tensor)
 
-    print(paper.shape)
+    print(paper[0])
