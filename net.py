@@ -33,70 +33,25 @@ class Self_Attention_Block(nn.Module):
         return x
 
 
-# class Ellipsoids(nn.Module):
-#     def __init__(self,
-#                  num_points,
-#                  matrix_dim,
-#                  min_val,
-#                  max_val,
-#                  device):
-#         super().__init__()
-#         points = torch.FloatTensor(num_points, matrix_dim).uniform_(min_val, max_val)
-#         # 中心位置可变参数
-#         self.centers = nn.Parameter(points).to(device)
-#
-#         L = torch.tril(torch.randn(num_points, matrix_dim, matrix_dim, requires_grad=True))
-#         # 确保每个矩阵的对角线元素为正以保证正定性
-#         L.diagonal(dim1=-2, dim2=-1).abs_()
-#         self.L = nn.Parameter(L).to(device)
-#         indices = torch.tril_indices(row=matrix_dim, col=matrix_dim, offset=0)
-#
-#         # 提取下三角部分的非零元素
-#         elements = self.L[:, indices[0], indices[1]]
-#
-#         # 将提取的下三角元素变形为(num_points, 6)的形状
-#         self.elements = elements.view(num_points, -1)
-#
-#         # 保存这个特征的个数
-#         self.len = self.elements.shape[1] + self.centers.shape[1]
-#
-#     def forward(self, x):
-#         # 表示高斯椭球(num_points, 6+3) 6个协方差矩阵值，3个位置坐标值
-#         gaussian_ellipsoids = torch.cat((self.centers, self.elements), dim=1)
-#         return gaussian_ellipsoids
 class Ellipsoids(nn.Module):
     def __init__(self,
                  num_points,
                  matrix_dim,
                  min_val,
                  max_val,
+                 rotate_dim=64,
+                 scale_dim=64,
                  ):
         super().__init__()
-        self.matrix_dim = matrix_dim
-        self.num_points = num_points
-        points = torch.FloatTensor(num_points, matrix_dim).uniform_(min_val, max_val)
-        # 中心位置可变参数
-        self.centers = nn.Parameter(points)
+        Center = nn.Parameter(torch.empty(num_points, matrix_dim).uniform_(min_val, max_val))
+        Rotate = nn.Parameter(torch.ones(num_points, rotate_dim))
+        Scale = nn.Parameter(torch.ones(num_points, scale_dim))
 
-        L = torch.tril(torch.randn(num_points, matrix_dim, matrix_dim))
-        # 确保每个矩阵的对角线元素为正以保证正定性
-        L.diagonal(dim1=-2, dim2=-1).abs_()
-        self.L = nn.Parameter(L)
+        self.gaussian_ellipsoids = torch.cat((Center, Rotate, Scale), dim=1)
 
     def forward(self, x):
-        self.L.to(x.device)
-        self.centers.to(x.device)
-        indices = torch.tril_indices(row=self.matrix_dim, col=self.matrix_dim, offset=0)
-
-        # 提取下三角部分的非零元素
-        elements = self.L[:, indices[0], indices[1]]
-
-        # 将提取的下三角元素变形为(num_points, 6)的形状
-        elements = elements.view(self.num_points, -1)
-
-        gaussian_ellipsoids = (torch.cat((self.centers, elements), dim=1))
-
-        return gaussian_ellipsoids
+        x = self.gaussian_ellipsoids.to(x.device)
+        return x
 
 
 class Cross_Attention_Block(nn.Module):
@@ -133,15 +88,17 @@ class Attention_3DGS(nn.Module):
                  dropout=0.1,
                  min_val=-10.,
                  max_val=10.,
+                 rotate_dim=64,
+                 scale_dim=64,
                  paper_size=(512, 512, 3)):
         super().__init__()
         self.seq_len = seq_len
         self.input_dim = input_dim
         self.paper_size = paper_size
         self.fc_seq = nn.Linear(input_dim, input_dim * seq_len)
-        self.gen_gaussian_ellipsoids = Ellipsoids(num_points, matrix_dim, min_val, max_val)
+        self.gen_gaussian_ellipsoids = Ellipsoids(num_points, matrix_dim, min_val, max_val, rotate_dim, scale_dim)
         self.paper_self_attention = Self_Attention_Block(seq_len, input_dim, embed_dim)
-        self.brush_self_attention = Self_Attention_Block(num_points, 9, embed_dim)
+        self.brush_self_attention = Self_Attention_Block(num_points, matrix_dim+rotate_dim+scale_dim, embed_dim)
         self.draw_cross_attention = Cross_Attention_Block(seq_len, num_points, embed_dim, num_layers, num_heads,
                                                           dropout)
 
@@ -172,7 +129,6 @@ if __name__ == '__main__':
     batch_size = 8
     max_val = 1.
     min_val = -1.
-
 
     tensor = torch.randn(batch_size, input_dim).to(device)
 
