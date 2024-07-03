@@ -1,155 +1,275 @@
-import torch
 import torch.nn as nn
+import torch
 
 
-class Self_Attention_Block(nn.Module):
-    def __init__(self,
-                 seq_len,
-                 input_dim,
-                 embed_dim,
-                 num_layers=2,
-                 num_heads=8,
-                 dropout=0.1):
+class ResidualBlock(nn.Module):
+    """
+    用于Canvas2Picture做残差连接
+    """
+
+    def __init__(self, channels):
         super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
 
-        self.fc = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
-            nn.ReLU(),
-            nn.Linear(input_dim, embed_dim),
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out += residual
+        return out
+
+
+class PixelShuffleBlock(nn.Module):
+    """
+    用于Canvas2Picture做上采样
+    """
+
+    def __init__(self, in_channels, out_channels, upscale_factor):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels * (upscale_factor ** 2), kernel_size=3, padding=1)
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.pixel_shuffle(x)
+        x = self.relu(x)
+        return x
+
+
+class Canvas2Picture(nn.Module):
+    def __init__(self, H, W, input_dim, initial_channels=128, output_channels=3):
+        super().__init__()
+        self.initial_channels = initial_channels
+        self.H = H
+        self.W = W
+
+        self.fc = nn.Linear(input_dim, initial_channels * (H // 8) * (W // 8))
+        self.res_block1 = ResidualBlock(initial_channels)
+        self.res_block2 = ResidualBlock(initial_channels)
+
+        self.pixel_shuffle1 = PixelShuffleBlock(initial_channels, initial_channels // 2, upscale_factor=2)
+        self.pixel_shuffle2 = PixelShuffleBlock(initial_channels // 2, initial_channels // 4, upscale_factor=2)
+        self.pixel_shuffle3 = PixelShuffleBlock(initial_channels // 4, output_channels, upscale_factor=2)
+
+        self.tanh = nn.Tanh()
+
+    def forward(self, x):
+        # 输入 x 的形状为 (batch_size, input_dim)
+        batch_size = x.size(0)
+
+        # 全连接层将 x 变为 (batch_size, initial_channels * (H // 8) * (W // 8))
+        x = self.fc(x)
+
+        # 重塑为 (batch_size, initial_channels, H // 8, W // 8)
+        x = x.view(batch_size, self.initial_channels, self.H // 8, self.W // 8)
+
+        # 应用残差块
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+
+        # 应用 PixelShuffle 上采样
+        x = self.pixel_shuffle1(x)
+        x = self.pixel_shuffle2(x)
+        x = self.pixel_shuffle3(x)
+
+        # 控制输出范围(-1. 1)
+        x = self.tanh(x)
+        return x
+
+
+class AvgPooling(nn.Module):
+    """
+    对于图片一般的seq_len太大了，于是需要减小
+    """
+
+    def __init__(self, reduction_factor=2):
+        super().__init__()
+        self.reduction_factor = reduction_factor
+
+    def forward(self, x):
+        batch_size, seq_len, embed_dim = x.size()
+        num_output_tokens = seq_len // self.reduction_factor
+
+        pooled_output = torch.mean(x.view(batch_size, num_output_tokens, self.reduction_factor, embed_dim), dim=2)
+
+        return pooled_output
+
+
+class DrawCanvas(nn.Module):
+    """
+    对Canvas进行Self-Attention进行画画,
+    """
+
+    def __init__(self, embed_dim, num_heads, num_layers, dropout):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.layers = nn.ModuleList(
+            [nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout)
+             for _ in range(num_layers)]
         )
-        self.norm = nn.LayerNorm([seq_len, embed_dim])
+        self.norms = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(num_layers)])
+        self.ffns = nn.ModuleList(
+            [nn.Sequential(
+                nn.Linear(embed_dim, 4 * embed_dim),
+                nn.ReLU(),
+                nn.Linear(4 * embed_dim, embed_dim),
+                nn.Dropout(dropout)
+            ) for _ in range(num_layers)]
+        )
+
+    def forward(self, x):
+        canvas = x
+        for layer, norm, ffn in zip(self.layers, self.norms, self.ffns):
+            attn_output, _ = layer(canvas, canvas, canvas)
+            canvas = canvas + attn_output
+            canvas = norm(canvas)
+            ffn_output = ffn(canvas)
+            canvas = canvas + ffn_output
+            canvas = norm(canvas)
+        return canvas
+
+
+class PositionalEncoding(nn.Module):
+    """
+    对 blank_canvas 做位置编码
+    """
+
+    def __init__(self, embed_dim, max_len):
+        super().__init__()
+        self.embed_dim = embed_dim
+
+        # 计算位置编码矩阵
+        pe = torch.zeros(max_len, embed_dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-torch.log(torch.tensor(10000.0)) / embed_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # 在 batch 维度上增加维度
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        pe = self.pe.to(x.device)  # 将位置编码移动到输入张量的设备
+        # 添加位置编码到输入张量
+        x = x + pe[:, :x.size(1)]
+        return x
+
+
+class Canvas(nn.Module):
+    """
+    对空白Canvas和camera做交叉注意力，得到具有位置信息的Canvas
+    """
+
+    def __init__(self, embed_dim, num_heads, dropout, num_layers):
+        super().__init__()
+        self.embed_dim = embed_dim
         self.layers = nn.ModuleList(
             [nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout)
              for _ in range(num_layers)]
         )
 
-    def forward(self, x):
-        x = self.norm(self.fc(x))
+    def forward(self, camera, blank_canvas):
+        canvas = blank_canvas
+        for layer in self.layers:
+            canvas, _ = layer(canvas, camera, camera)
+        canvas = blank_canvas + canvas
 
-        for _, layer in enumerate(self.layers):
-            x, _ = layer(x, x, x)
-            x = self.norm(x)
-
-        return x
+        return canvas
 
 
-class Ellipsoids(nn.Module):
-    def __init__(self,
-                 num_points,
-                 matrix_dim,
-                 min_val,
-                 max_val,
-                 rotate_dim=64,
-                 scale_dim=64,
-                 ):
+class Attention_3DGS_Generator(nn.Module):
+    def __init__(self, embed_dim, H, W, num_reduction):
         super().__init__()
-
-        # 定义模型参数
-        self.Center = nn.Parameter(torch.empty(num_points, matrix_dim).uniform_(min_val, max_val))
-        self.Rotate = nn.Parameter(torch.ones(num_points, rotate_dim))
-        self.Scale = nn.Parameter(torch.ones(num_points, scale_dim))
-
-    def forward(self, x):
-        # 拼接模型参数
-        gaussian_ellipsoids = torch.cat((self.Center, self.Rotate, self.Scale), dim=1)
-
-        # 将拼接后的张量移到输入 x 所在的设备上
-        gaussian_ellipsoids = gaussian_ellipsoids.to(x.device)
-
-        return gaussian_ellipsoids
-
-
-class Cross_Attention_Block(nn.Module):
-    def __init__(self,
-                 seq_len,
-                 num_points,
-                 embed_dim,
-                 num_layers,
-                 num_heads,
-                 dropout):
-        super().__init__()
-        self.norm_paper = nn.LayerNorm([seq_len, embed_dim])
-        self.norm_brush = nn.LayerNorm([num_points, embed_dim])
-        self.layers = nn.ModuleList(
-            [nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout, add_bias_kv=True)
-             for _ in range(num_layers)]
-        )
-
-    def forward(self, q, kv):
-        for _, layer in enumerate(self.layers):
-            q, _ = layer(q, kv, kv)
-        return q
-
-
-class Attention_3DGS(nn.Module):
-    def __init__(self,
-                 input_dim,
-                 seq_len,
-                 embed_dim,
-                 num_points,
-                 matrix_dim=3,
-                 num_layers=4,
-                 num_heads=8,
-                 dropout=0.1,
-                 min_val=-10.,
-                 max_val=10.,
-                 rotate_dim=64,
-                 scale_dim=64,
-                 paper_size=(512, 512, 3)):
-        super().__init__()
-        self.seq_len = seq_len
-        self.input_dim = input_dim
         self.embed_dim = embed_dim
-        self.H, self.W, self.C = paper_size
-        self.fc_seq = nn.Linear(input_dim, input_dim * seq_len)
-        self.gen_gaussian_ellipsoids = Ellipsoids(num_points, matrix_dim, min_val, max_val, rotate_dim, scale_dim)
-        self.paper_self_attention = Self_Attention_Block(seq_len, input_dim, embed_dim)
-        self.brush_self_attention = Self_Attention_Block(num_points, matrix_dim + rotate_dim + scale_dim, embed_dim)
-        self.draw_cross_attention = Cross_Attention_Block(seq_len, num_points, embed_dim, num_layers, num_heads,
-                                                          dropout)
-        self.get_drawing = nn.Sequential(
-            nn.Unflatten(1, (self.H, self.W, self.C)),
-            nn.ReLU(),
-            nn.Hardtanh(-1, 1)
+        self.H = H
+        self.W = W
+        self.reduction_factor = 2 ** num_reduction
+
+        self.positional_encoding = PositionalEncoding(self.embed_dim, self.H * self.W)
+        self.canvas = Canvas(self.embed_dim, num_heads=2, dropout=0.3, num_layers=2)
+        self.canvas_pool = nn.Sequential(
+            *[AvgPooling() for _ in range(num_reduction)]
+        )
+        self.draw_canvas = DrawCanvas(self.embed_dim, num_heads=2, dropout=0.3, num_layers=2)
+        self.canvas2picture = Canvas2Picture(self.H, self.W,
+                                             (self.H * self.W * self.embed_dim) // self.reduction_factor)
+
+    def forward(self, camera, blank_canvas):
+        batch_size = camera.size(0)
+        camera = camera.unsqueeze(-1).expand(-1, -1, self.embed_dim)
+        blank_canvas = blank_canvas.view(batch_size, self.H * self.W, self.embed_dim)  # 展平并确保形状一致
+        blank_canvas = self.positional_encoding(blank_canvas)
+        canvas = self.canvas(camera, blank_canvas)
+        canvas = self.canvas_pool(canvas)
+        canvas = self.draw_canvas(canvas)
+        canvas = canvas.view(batch_size, -1)
+        picture = self.canvas2picture(canvas)
+
+        return picture
+
+
+class Attention_3DGS_Discriminator(nn.Module):
+    def __init__(self, input_channels=3, feature_dim=64):
+        super().__init__()
+
+        self.model = nn.Sequential(
+            # 输入层 (input_channels, 288, 384)
+            nn.Conv2d(input_channels, feature_dim, kernel_size=4, stride=2, padding=1),  # (feature_dim, 144, 192)
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 隐藏层1
+            nn.Conv2d(feature_dim, feature_dim * 2, kernel_size=4, stride=2, padding=1),  # (feature_dim * 2, 72, 96)
+            nn.BatchNorm2d(feature_dim * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 隐藏层2
+            nn.Conv2d(feature_dim * 2, feature_dim * 4, kernel_size=4, stride=2, padding=1),
+            # (feature_dim * 4, 36, 48)
+            nn.BatchNorm2d(feature_dim * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 隐藏层3
+            nn.Conv2d(feature_dim * 4, feature_dim * 8, kernel_size=4, stride=2, padding=1),
+            # (feature_dim * 8, 18, 24)
+            nn.BatchNorm2d(feature_dim * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 隐藏层4
+            nn.Conv2d(feature_dim * 8, feature_dim * 16, kernel_size=4, stride=2, padding=1),
+            # (feature_dim * 16, 9, 12)
+            nn.BatchNorm2d(feature_dim * 16),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # 输出层
+            nn.Conv2d(feature_dim * 16, 1, kernel_size=4, stride=1, padding=0),  # (1, 6, 9)
+            nn.Sigmoid()
         )
 
     def forward(self, x):
-        x = self.fc_seq(x)  # (batch, 6) -> (batch, seq_len*input_dim)
-        q = x.view(-1, self.seq_len, self.input_dim)  # (batch, seq_len*6) -> (batch, seq_len, 6)
-        kv = self.gen_gaussian_ellipsoids(q).unsqueeze(0).expand(x.size(0), -1, -1)  # (num_points, 9)->(batch,
-        # num_points, 9)
-        paper_q = self.paper_self_attention(q)  # (batch, seq_len, embed_dim)
-        brush_kv = self.brush_self_attention(kv)  # (batch, num_points, embed_dim)
-        x = self.draw_cross_attention(paper_q, brush_kv)  # (batch, seq_len, embed_dim)
-        x = x.reshape(-1, self.seq_len * self.embed_dim)  # (batch, seq_len, embed_dim) -> (batch, seq_len*embed_dim)
-        x = self.get_drawing(x)
-        x = (x+1.)*127.5
-        x = x.round()
-
-        return x
+        return self.model(x)
 
 
 if __name__ == '__main__':
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # 暂时不要改变
-    embed_dim = 1024
-    seq_len = 768
-    input_dim = 6
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    label_path = './data/images'
+    img_view_path = './data/inputs/images.csv'
+    cameras_path = './data/inputs/cameras.csv'
+    scale_factor = 0.125
+    embed_dim = 32
+    W = 3072
+    H = 2304
+    batch = 4
+    blank_canvas = torch.randn((batch, 288, 384, embed_dim), dtype=torch.float32).to(device)
+    gen = Attention_3DGS_Generator(embed_dim=embed_dim, H=288, W=384, num_reduction=12).to(device)  # (384, 288)
 
-    # 可以调整的数
-    num_points = 1024
-    batch_size = 8
-    max_val = 1.
-    min_val = -1.
-
-    tensor = torch.randn(batch_size, input_dim).to(device)
-
-    net = Attention_3DGS(input_dim=input_dim,
-                         seq_len=seq_len,
-                         embed_dim=embed_dim,
-                         num_points=num_points,
-                         max_val=max_val,
-                         min_val=min_val, ).to(device)
-    paper = net(tensor)
-
-    print(paper[0])
+    cameras = torch.randn(batch, 10).to(device)
+    out = gen(cameras, blank_canvas)
+    print(out.shape)

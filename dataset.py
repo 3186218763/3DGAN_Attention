@@ -5,18 +5,23 @@ from utools import get_samples
 class GS_Dataset(Dataset):
     """
     sample = {
-            'data': data,
-            'img': img,
+            "camera_params": camera_params,
+            "label": img,
         }
     """
-    def __init__(self, img_path, data_path):
-        self.samples = get_samples(img_path=img_path, data_path=data_path)
+
+    def __init__(self, cameras_path, img_view_path, label_path, transform=None):
+        self.transform = transform
+        self.samples = get_samples(label_path, img_view_path, cameras_path)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        data = sample['data']
-        img = sample['img']
-        return data, img
+        camera_params = sample['camera_params']
+        label = sample['label']
+        if self.transform is not None:
+            label = self.transform(label)
+
+        return camera_params, label
 
     def __len__(self):
         return len(self.samples)
