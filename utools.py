@@ -130,7 +130,6 @@ def get_samples(label_path, img_view_path, cameras_path, scale_factor=1.):
         camera_params = torch.cat([intrinsics, extrinsics])
         name = row['NAME']
         img = Image.open(os.path.join(label_path, name))
-        img = transform(img)
         sample = {
             "camera_params": camera_params,
             "label": img,

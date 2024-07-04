@@ -185,7 +185,7 @@ class Canvas(nn.Module):
         return canvas
 
 
-class Attention_3DGS_Generator(nn.Module):
+class Draw_Attention_Generator(nn.Module):
     def __init__(self, embed_dim, H, W, num_reduction):
         super().__init__()
         self.embed_dim = embed_dim
@@ -216,7 +216,7 @@ class Attention_3DGS_Generator(nn.Module):
         return picture
 
 
-class Attention_3DGS_Discriminator(nn.Module):
+class Draw_Attention_Discriminator(nn.Module):
     def __init__(self, input_channels=3, feature_dim=64):
         super().__init__()
 
@@ -268,8 +268,12 @@ if __name__ == '__main__':
     H = 2304
     batch = 4
     blank_canvas = torch.randn((batch, 288, 384, embed_dim), dtype=torch.float32).to(device)
-    gen = Attention_3DGS_Generator(embed_dim=embed_dim, H=288, W=384, num_reduction=12).to(device)  # (384, 288)
-
+    gen = Draw_Attention_Generator(embed_dim=embed_dim, H=288, W=384, num_reduction=12).to(device)  # (384, 288)
+    dis = Draw_Attention_Discriminator(input_channels=3, feature_dim=64).to(device)
     cameras = torch.randn(batch, 10).to(device)
     out = gen(cameras, blank_canvas)
+    out2 = dis(out)
+    valid = torch.ones(out2.shape).to(device)
     print(out.shape)
+    print(out2.shape)
+    print(valid.shape)
