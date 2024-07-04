@@ -7,9 +7,8 @@ import torch.nn as nn
 from tqdm import tqdm
 from torchvision import transforms
 
-def train(model, train_loader, optimizer, criterion, epoch):
 
-if __name__ == '__main__':
+def train():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     label_path = './data/images'
     img_view_path = './data/inputs/images.csv'
@@ -36,7 +35,6 @@ if __name__ == '__main__':
         gen.load_state_dict(torch.load_state_dic(gen_model_path))
         print("生成器参数加载成功")
 
-
     dis = Draw_Attention_Discriminator(feature_dim=64).to(device)
     loss_fn = nn.BCELoss()
     optimizer_gen = optim.Adam(gen.parameters(), lr=0.0002, betas=(0.5, 0.999))
@@ -53,7 +51,6 @@ if __name__ == '__main__':
             # 获取数据和标签
             camera_params, label = batch
             camera_params, label = camera_params.to(device), label.to(device)
-
 
             # 训练生成器
             optimizer_gen.zero_grad()
@@ -88,3 +85,7 @@ if __name__ == '__main__':
         scheduler_dis.step()
 
     torch.save(gen.state_dict(), './pth/generator.pth')
+
+
+if __name__ == '__main__':
+    train()
