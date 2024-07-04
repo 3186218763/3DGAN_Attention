@@ -2,18 +2,19 @@ from torch.utils.data import DataLoader
 from dataset import GS_Dataset
 from net import Draw_Attention_Generator, Draw_Attention_Discriminator
 from torch import optim
-from torch.optim import lr_scheduler
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 from torchvision import transforms
+
+def train(model, train_loader, optimizer, criterion, epoch):
 
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     label_path = './data/images'
     img_view_path = './data/inputs/images.csv'
     cameras_path = './data/inputs/cameras.csv'
+    gen_model_path = None
     num_epochs = 100
     scale_factor = 0.125
     embed_dim = 32
@@ -31,6 +32,11 @@ if __name__ == '__main__':
 
     gen = Draw_Attention_Generator(embed_dim=embed_dim, H=H * scale_factor, W=W * scale_factor,
                                    num_reduction=num_reduction).to(device)  # (384, 288)
+    if gen_model_path is None:
+        gen.load_state_dict(torch.load_state_dic(gen_model_path))
+        print("生成器参数加载成功")
+
+
     dis = Draw_Attention_Discriminator(feature_dim=64).to(device)
     loss_fn = nn.BCELoss()
     optimizer_gen = optim.Adam(gen.parameters(), lr=0.0002, betas=(0.5, 0.999))
