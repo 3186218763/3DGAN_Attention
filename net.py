@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch
+import torch.optim as optim
 
 
 class ResidualBlock(nn.Module):
@@ -11,18 +12,17 @@ class ResidualBlock(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU()
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(channels)
 
     def forward(self, x):
-        residual = x
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
-        out += residual
+        out += x
         return out
 
 
@@ -33,14 +33,15 @@ class PixelShuffleBlock(nn.Module):
 
     def __init__(self, in_channels, out_channels, upscale_factor):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels * (upscale_factor ** 2), kernel_size=3, padding=1)
-        self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
-        self.relu = nn.ReLU(inplace=True)
+        self.pixel_shuffle = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels * (upscale_factor ** 2), kernel_size=3, padding=1),
+            nn.PixelShuffle(upscale_factor),
+            nn.ReLU()
+        )
+
 
     def forward(self, x):
-        x = self.conv(x)
         x = self.pixel_shuffle(x)
-        x = self.relu(x)
         return x
 
 
@@ -186,7 +187,7 @@ class Canvas(nn.Module):
 
 
 class Draw_Attention_Generator(nn.Module):
-    def __init__(self, embed_dim, H, W, num_reduction):
+    def __init__(self, embed_dim: int, H: int, W: int, num_reduction: int):
         super().__init__()
         self.embed_dim = embed_dim
         self.H = H
@@ -223,30 +224,30 @@ class Draw_Attention_Discriminator(nn.Module):
         self.model = nn.Sequential(
             # 输入层 (input_channels, 288, 384)
             nn.Conv2d(input_channels, feature_dim, kernel_size=4, stride=2, padding=1),  # (feature_dim, 144, 192)
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
 
             # 隐藏层1
             nn.Conv2d(feature_dim, feature_dim * 2, kernel_size=4, stride=2, padding=1),  # (feature_dim * 2, 72, 96)
             nn.BatchNorm2d(feature_dim * 2),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
 
             # 隐藏层2
             nn.Conv2d(feature_dim * 2, feature_dim * 4, kernel_size=4, stride=2, padding=1),
             # (feature_dim * 4, 36, 48)
             nn.BatchNorm2d(feature_dim * 4),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
 
             # 隐藏层3
             nn.Conv2d(feature_dim * 4, feature_dim * 8, kernel_size=4, stride=2, padding=1),
             # (feature_dim * 8, 18, 24)
             nn.BatchNorm2d(feature_dim * 8),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
 
             # 隐藏层4
             nn.Conv2d(feature_dim * 8, feature_dim * 16, kernel_size=4, stride=2, padding=1),
             # (feature_dim * 16, 9, 12)
             nn.BatchNorm2d(feature_dim * 16),
-            nn.LeakyReLU(0.2, inplace=True),
+            nn.LeakyReLU(0.2),
 
             # 输出层
             nn.Conv2d(feature_dim * 16, 1, kernel_size=4, stride=1, padding=0),  # (1, 6, 9)
@@ -262,18 +263,61 @@ if __name__ == '__main__':
     label_path = './data/images'
     img_view_path = './data/inputs/images.csv'
     cameras_path = './data/inputs/cameras.csv'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     scale_factor = 0.125
     embed_dim = 32
     W = 3072
     H = 2304
     batch = 4
-    blank_canvas = torch.randn((batch, 288, 384, embed_dim), dtype=torch.float32).to(device)
-    gen = Draw_Attention_Generator(embed_dim=embed_dim, H=288, W=384, num_reduction=12).to(device)  # (384, 288)
+
+    # Initialize generator and discriminator
+    gen = Draw_Attention_Generator(embed_dim=embed_dim, H=288, W=384, num_reduction=12).to(device)
     dis = Draw_Attention_Discriminator(input_channels=3, feature_dim=64).to(device)
+
+    # Generate random data
+    blank_canvas = torch.randn((batch, 288, 384, embed_dim), dtype=torch.float32).to(device)
     cameras = torch.randn(batch, 10).to(device)
+
+    # Forward pass
     out = gen(cameras, blank_canvas)
     out2 = dis(out)
+
+    # Print shapes of the outputs
+    print("Generator output shape:", out.shape)
+    print("Discriminator output shape:", out2.shape)
+
+    # Initialize target and loss function
     valid = torch.ones(out2.shape).to(device)
-    print(out.shape)
-    print(out2.shape)
-    print(valid.shape)
+    criterion = nn.BCELoss()
+
+    # Compute loss for discriminator and generator
+    d_loss = criterion(out2, valid)
+
+    # Initialize optimizers
+    optimizer_G = optim.Adam(gen.parameters(), lr=0.0002, betas=(0.5, 0.999))
+    optimizer_D = optim.Adam(dis.parameters(), lr=0.0002, betas=(0.5, 0.999))
+
+    # Zero the gradients
+    optimizer_D.zero_grad()
+    optimizer_G.zero_grad()
+
+    # Backward pass for discriminator
+    try:
+        d_loss.backward(retain_graph=True)
+        optimizer_D.step()
+        print("Discriminator backward pass successful.")
+    except RuntimeError as e:
+        print(f"Error in Discriminator backward pass: {e}")
+
+    # Compute loss for generator
+    fake_labels = torch.ones(out2.shape).to(device)
+    g_loss = criterion(dis(out.detach()), fake_labels)
+
+    # Backward pass for generator
+    try:
+        g_loss.backward()
+        optimizer_G.step()
+        print("Generator backward pass successful.")
+    except RuntimeError as e:
+        print(f"Error in Generator backward pass: {e}")

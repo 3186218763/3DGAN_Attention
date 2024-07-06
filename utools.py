@@ -2,15 +2,9 @@ import os
 import pandas as pd
 import torch
 from PIL import Image
-from torchvision import transforms
+
 from scipy.spatial.transform import Rotation as R
 import numpy as np
-
-transform = transforms.Compose([
-    transforms.Resize((400, 500)),
-    transforms.ToTensor(),  # Convert PIL Image to Tensor
-    transforms.Normalize(0.5, 0.5)
-])
 
 
 def get_cameras_csv(cameras_txt):
@@ -138,10 +132,55 @@ def get_samples(label_path, img_view_path, cameras_path, scale_factor=1.):
     return samples
 
 
+
+def tensor_to_image(tensor):
+    """
+    将归一化后的张量还原回图像并显示。
+
+    Args:
+    tensor (numpy.ndarray): 形状为 (1, 3, 288, 384) 且范围在 [-1, 1] 的归一化张量。
+
+    Returns:
+    numpy.ndarray: 还原后的图像，形状为 (288, 384, 3) 且范围在 [0, 255]。
+    """
+    # 去掉批次维度
+    tensor = tensor.squeeze(0)
+
+    # 检查输入张量的形状
+    if tensor.ndim != 3 or tensor.shape[0] != 3:
+        raise ValueError("输入张量必须是形状为 (3, 288, 384) 的 3 维张量")
+
+    # 反归一化到 [0, 1]
+    tensor = (tensor + 1) / 2
+
+    # 将范围从 [0, 1] 转换为 [0, 255]
+    tensor = (tensor * 255).astype(np.uint8)
+
+    # 转换为 HWC 格式
+    tensor = np.transpose(tensor, (1, 2, 0))
+
+    return tensor
+
+
+def save_image(image, file_path='./imgs/01.png'):
+    """
+    将 numpy 数组保存为 PNG 图片。
+
+    Args:
+    image (numpy.ndarray): 形状为 (H, W, C) 的图像数组，范围在 [0, 255]。
+    file_path (str): 要保存的文件路径。
+    """
+    # 将 numpy 数组转换为 PIL Image
+    image = Image.fromarray(image)
+
+    # 保存为 PNG 格式
+    image.save(file_path, format='PNG')
+
+
 if __name__ == '__main__':
     label_path = './data/images'
     img_view_path = './data/inputs/images.csv'
     cameras_path = './data/inputs/cameras.csv'
     samples = get_samples(label_path, img_view_path, cameras_path)
     sample = samples[0]
-    print(sample["label"].shape)
+    print(sample["camera_params"])
