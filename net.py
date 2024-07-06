@@ -10,18 +10,16 @@ class ResidualBlock(nn.Module):
 
     def __init__(self, channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
-        self.relu = nn.ReLU()
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+        self.res = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+        )
 
     def forward(self, x):
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
+        out = self.res(x)
         out += x
         return out
 
@@ -39,7 +37,6 @@ class PixelShuffleBlock(nn.Module):
             nn.ReLU()
         )
 
-
     def forward(self, x):
         x = self.pixel_shuffle(x)
         return x
@@ -53,12 +50,16 @@ class Canvas2Picture(nn.Module):
         self.W = W
 
         self.fc = nn.Linear(input_dim, initial_channels * (H // 8) * (W // 8))
-        self.res_block1 = ResidualBlock(initial_channels)
-        self.res_block2 = ResidualBlock(initial_channels)
+        self.res_block = nn.Sequential(
+            ResidualBlock(initial_channels),
+            ResidualBlock(initial_channels),
+        )
 
-        self.pixel_shuffle1 = PixelShuffleBlock(initial_channels, initial_channels // 2, upscale_factor=2)
-        self.pixel_shuffle2 = PixelShuffleBlock(initial_channels // 2, initial_channels // 4, upscale_factor=2)
-        self.pixel_shuffle3 = PixelShuffleBlock(initial_channels // 4, output_channels, upscale_factor=2)
+        self.pixel_shuffle = nn.Sequential(
+            PixelShuffleBlock(initial_channels, initial_channels // 2, upscale_factor=2),
+            PixelShuffleBlock(initial_channels // 2, initial_channels // 4, upscale_factor=2),
+            PixelShuffleBlock(initial_channels // 4, output_channels, upscale_factor=2)
+        )
 
         self.tanh = nn.Tanh()
 
@@ -73,35 +74,15 @@ class Canvas2Picture(nn.Module):
         x = x.view(batch_size, self.initial_channels, self.H // 8, self.W // 8)
 
         # 应用残差块
-        x = self.res_block1(x)
-        x = self.res_block2(x)
+        x = self.res_block(x)
 
         # 应用 PixelShuffle 上采样
-        x = self.pixel_shuffle1(x)
-        x = self.pixel_shuffle2(x)
-        x = self.pixel_shuffle3(x)
+        x = self.pixel_shuffle(x)
 
         # 控制输出范围(-1. 1)
         x = self.tanh(x)
+
         return x
-
-
-class AvgPooling(nn.Module):
-    """
-    对于图片一般的seq_len太大了，于是需要减小
-    """
-
-    def __init__(self, reduction_factor=2):
-        super().__init__()
-        self.reduction_factor = reduction_factor
-
-    def forward(self, x):
-        batch_size, seq_len, embed_dim = x.size()
-        num_output_tokens = seq_len // self.reduction_factor
-
-        pooled_output = torch.mean(x.view(batch_size, num_output_tokens, self.reduction_factor, embed_dim), dim=2)
-
-        return pooled_output
 
 
 class DrawCanvas(nn.Module):
@@ -113,29 +94,12 @@ class DrawCanvas(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.layers = nn.ModuleList(
-            [nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout)
-             for _ in range(num_layers)]
-        )
-        self.norms = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(num_layers)])
-        self.ffns = nn.ModuleList(
-            [nn.Sequential(
-                nn.Linear(embed_dim, 4 * embed_dim),
-                nn.ReLU(),
-                nn.Linear(4 * embed_dim, embed_dim),
-                nn.Dropout(dropout)
-            ) for _ in range(num_layers)]
-        )
+        self.encoderlayer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, batch_first=True,
+                                                       dropout=dropout)
+        self.encoder = nn.TransformerEncoder(self.encoderlayer, num_layers=num_layers)
 
     def forward(self, x):
-        canvas = x
-        for layer, norm, ffn in zip(self.layers, self.norms, self.ffns):
-            attn_output, _ = layer(canvas, canvas, canvas)
-            canvas = canvas + attn_output
-            canvas = norm(canvas)
-            ffn_output = ffn(canvas)
-            canvas = canvas + ffn_output
-            canvas = norm(canvas)
+        canvas = self.encoder(x)
         return canvas
 
 
@@ -173,43 +137,45 @@ class Canvas(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.layers = nn.ModuleList(
-            [nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout)
-             for _ in range(num_layers)]
+            [nn.ModuleList([
+                nn.MultiheadAttention(embed_dim, num_heads, batch_first=True, dropout=dropout),
+                nn.BatchNorm1d(embed_dim),
+                nn.Dropout(dropout)
+            ]) for _ in range(num_layers)]
         )
 
     def forward(self, camera, blank_canvas):
         canvas = blank_canvas
-        for layer in self.layers:
-            canvas, _ = layer(canvas, camera, camera)
-        canvas = blank_canvas + canvas
-
+        for attention, norm, dropout in self.layers:
+            attended_canvas, _ = attention(canvas, camera, camera)
+            canvas = canvas + dropout(attended_canvas)
+            canvas = norm(canvas)
         return canvas
 
 
 class Draw_Attention_Generator(nn.Module):
-    def __init__(self, embed_dim: int, H: int, W: int, num_reduction: int):
+    def __init__(self, embed_dim: int, canvas_dim: int, H: int, W: int):
         super().__init__()
         self.embed_dim = embed_dim
+        self.canvas_dim = canvas_dim
         self.H = H
         self.W = W
-        self.reduction_factor = 2 ** num_reduction
 
-        self.positional_encoding = PositionalEncoding(self.embed_dim, self.H * self.W)
-        self.canvas = Canvas(self.embed_dim, num_heads=2, dropout=0.3, num_layers=2)
-        self.canvas_pool = nn.Sequential(
-            *[AvgPooling() for _ in range(num_reduction)]
-        )
-        self.draw_canvas = DrawCanvas(self.embed_dim, num_heads=2, dropout=0.3, num_layers=2)
-        self.canvas2picture = Canvas2Picture(self.H, self.W,
-                                             (self.H * self.W * self.embed_dim) // self.reduction_factor)
+        self.fc = nn.Linear(10, self.canvas_dim * self.embed_dim)
+        self.positional_encoding = PositionalEncoding(self.embed_dim, self.canvas_dim)
+        self.canvas = Canvas(self.embed_dim, num_heads=32, dropout=0.2, num_layers=8)
+
+        self.draw_canvas = DrawCanvas(self.embed_dim, num_heads=32, dropout=0.2, num_layers=8)
+        self.canvas2picture = Canvas2Picture(H=self.H, W=self.W, input_dim=self.canvas_dim * self.embed_dim)
 
     def forward(self, camera, blank_canvas):
         batch_size = camera.size(0)
-        camera = camera.unsqueeze(-1).expand(-1, -1, self.embed_dim)
-        blank_canvas = blank_canvas.view(batch_size, self.H * self.W, self.embed_dim)  # 展平并确保形状一致
+
+        camera = self.fc(camera)
+        camera = camera.view(batch_size, self.canvas_dim, self.embed_dim)
+        blank_canvas = blank_canvas.view(batch_size, self.canvas_dim, self.embed_dim)
         blank_canvas = self.positional_encoding(blank_canvas)
         canvas = self.canvas(camera, blank_canvas)
-        canvas = self.canvas_pool(canvas)
         canvas = self.draw_canvas(canvas)
         canvas = canvas.view(batch_size, -1)
         picture = self.canvas2picture(canvas)
@@ -224,38 +190,48 @@ class Draw_Attention_Discriminator(nn.Module):
         self.model = nn.Sequential(
             # 输入层 (input_channels, 288, 384)
             nn.Conv2d(input_channels, feature_dim, kernel_size=4, stride=2, padding=1),  # (feature_dim, 144, 192)
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             # 隐藏层1
             nn.Conv2d(feature_dim, feature_dim * 2, kernel_size=4, stride=2, padding=1),  # (feature_dim * 2, 72, 96)
             nn.BatchNorm2d(feature_dim * 2),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             # 隐藏层2
             nn.Conv2d(feature_dim * 2, feature_dim * 4, kernel_size=4, stride=2, padding=1),
             # (feature_dim * 4, 36, 48)
             nn.BatchNorm2d(feature_dim * 4),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             # 隐藏层3
             nn.Conv2d(feature_dim * 4, feature_dim * 8, kernel_size=4, stride=2, padding=1),
             # (feature_dim * 8, 18, 24)
             nn.BatchNorm2d(feature_dim * 8),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             # 隐藏层4
             nn.Conv2d(feature_dim * 8, feature_dim * 16, kernel_size=4, stride=2, padding=1),
             # (feature_dim * 16, 9, 12)
             nn.BatchNorm2d(feature_dim * 16),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             # 输出层
             nn.Conv2d(feature_dim * 16, 1, kernel_size=4, stride=1, padding=0),  # (1, 6, 9)
-            nn.Sigmoid()
+
         )
 
     def forward(self, x):
         return self.model(x)
+
+    def initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, a=0.2)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
 
 if __name__ == '__main__':
@@ -270,13 +246,15 @@ if __name__ == '__main__':
     W = 3072
     H = 2304
     batch = 4
+    canvas_dim = 32
 
     # Initialize generator and discriminator
-    gen = Draw_Attention_Generator(embed_dim=embed_dim, H=288, W=384, num_reduction=12).to(device)
+    gen = Draw_Attention_Generator(embed_dim=embed_dim, canvas_dim=canvas_dim, H=288, W=384).to(device)
     dis = Draw_Attention_Discriminator(input_channels=3, feature_dim=64).to(device)
+    dis.initialize_weights()
 
     # Generate random data
-    blank_canvas = torch.randn((batch, 288, 384, embed_dim), dtype=torch.float32).to(device)
+    blank_canvas = torch.randn((batch, canvas_dim * embed_dim), dtype=torch.float32).to(device)
     cameras = torch.randn(batch, 10).to(device)
 
     # Forward pass
@@ -289,7 +267,7 @@ if __name__ == '__main__':
 
     # Initialize target and loss function
     valid = torch.ones(out2.shape).to(device)
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
 
     # Compute loss for discriminator and generator
     d_loss = criterion(out2, valid)

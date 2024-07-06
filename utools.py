@@ -2,7 +2,7 @@ import os
 import pandas as pd
 import torch
 from PIL import Image
-
+from torchvision import transforms
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 
@@ -132,49 +132,32 @@ def get_samples(label_path, img_view_path, cameras_path, scale_factor=1.):
     return samples
 
 
-
-def tensor_to_image(tensor):
+def tensor_to_image(tensor_img, output_path='./imgs/01.png'):
     """
-    将归一化后的张量还原回图像并显示。
-
-    Args:
-    tensor (numpy.ndarray): 形状为 (1, 3, 288, 384) 且范围在 [-1, 1] 的归一化张量。
-
-    Returns:
-    numpy.ndarray: 还原后的图像，形状为 (288, 384, 3) 且范围在 [0, 255]。
+    将归一化后的张量转换回原始图像，并保存为 PNG 图片。
+    输入:
+        tensor_img (torch.Tensor): 输入的图像张量，范围为 [-1, 1]。
+        output_path (str): 输出的图片路径。
     """
-    # 去掉批次维度
-    tensor = tensor.squeeze(0)
+    # 定义反归一化转换
+    inverse_transform = transforms.Compose([
+        transforms.Normalize(mean=[-1, -1, -1], std=[2, 2, 2]),  # 将 [-1, 1] 转换为 [0, 1]
+        transforms.ConvertImageDtype(torch.uint8),  # 将像素值从 [0, 1] 转换为 [0, 255]
+        transforms.ToPILImage()  # 将张量转换为 PIL 图像
+    ])
 
-    # 检查输入张量的形状
-    if tensor.ndim != 3 or tensor.shape[0] != 3:
-        raise ValueError("输入张量必须是形状为 (3, 288, 384) 的 3 维张量")
+    # 将张量移动到 CPU
+    tensor_img = tensor_img.cpu()
 
-    # 反归一化到 [0, 1]
-    tensor = (tensor + 1) / 2
+    # 反向转换图像
+    pil_img = inverse_transform(tensor_img)
 
-    # 将范围从 [0, 1] 转换为 [0, 255]
-    tensor = (tensor * 255).astype(np.uint8)
-
-    # 转换为 HWC 格式
-    tensor = np.transpose(tensor, (1, 2, 0))
-
-    return tensor
+    # 保存为 PNG 图片
+    pil_img.save(output_path)
+    print(f"Image saved to {output_path}")
 
 
-def save_image(image, file_path='./imgs/01.png'):
-    """
-    将 numpy 数组保存为 PNG 图片。
 
-    Args:
-    image (numpy.ndarray): 形状为 (H, W, C) 的图像数组，范围在 [0, 255]。
-    file_path (str): 要保存的文件路径。
-    """
-    # 将 numpy 数组转换为 PIL Image
-    image = Image.fromarray(image)
-
-    # 保存为 PNG 格式
-    image.save(file_path, format='PNG')
 
 
 if __name__ == '__main__':
